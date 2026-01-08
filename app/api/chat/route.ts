@@ -1,129 +1,76 @@
-// route.ts - Updated for new @ai-sdk/react API
-import { generateId, streamText } from 'ai';
+// app/api/chat/route.ts - AI SDK 6 Compatible
+import { streamText, convertToModelMessages, type UIMessage } from 'ai';
 import { openai } from '@ai-sdk/openai';
-// Uncomment when you add API keys:
-// import { anthropic } from '@ai-sdk/anthropic';
-// import { google } from '@ai-sdk/google-vertex';
 
-// In-memory chat storage (replace with DB later)
-const chats = new Map<string, any>();
-
-function readChat(id: string) {
-  return chats.get(id) || { id, messages: [] };
-}
-
-function saveChat(chat: any) {
-  chats.set(chat.id, chat);
-}
-
-// Multi-vendor model selector
-function getModel(provider: string = 'openai', modelName?: string) {
-  switch (provider.toLowerCase()) {
-    case 'openai':
-      return openai(modelName || 'gpt-4o-mini');
-    
-    // Uncomment when you have API keys:
-    // case 'anthropic':
-    //   return anthropic(modelName || 'claude-3-sonnet-20240229');
-    // case 'google':
-    //   return google(modelName || 'gemini-pro');
-    
-    default:
-      console.warn(`Unknown provider: ${provider}, defaulting to OpenAI`);
-      return openai('gpt-4o-mini');
-  }
-}
+// Allow streaming responses up to 30 seconds
+export const maxDuration = 30;
 
 export async function POST(req: Request) {
-  const body = await req.json();
-  console.log('📥 Received body:', JSON.stringify(body, null, 2));
-
-  // New useChat API sends: { id, messages: [...] }
-  // OR individual message: { id, message: {...} }
-  const {
-    id,
-    messages: incomingMessages,
-    message: singleMessage,
-    provider,
-    model,
-  } = body;
-
-  if (!id) {
-    return new Response(
-      JSON.stringify({ error: 'Missing chat id' }),
-      { status: 400 }
-    );
-  }
-
-  // Get existing chat
-  const chat = readChat(id);
-  
-  // Determine messages to use
-  let messages = [];
-  
-  if (incomingMessages && Array.isArray(incomingMessages)) {
-    // New API sends full message array
-    messages = incomingMessages;
-  } else if (singleMessage) {
-    // Old format compatibility
-    messages = [...(chat.messages || []), singleMessage];
-  } else {
-    // Use existing chat messages
-    messages = chat.messages || [];
-  }
-
-  console.log('💬 Processing messages:', messages.length);
-  console.log('📝 Messages array:', JSON.stringify(messages, null, 2));
-
-  // Validate messages
-  if (!messages || messages.length === 0) {
-    return new Response(
-      JSON.stringify({ error: 'No messages to process' }),
-      { status: 400 }
-    );
-  }
-
-  // Save updated chat
-  saveChat({ id, messages });
-
-  // Stream AI response
   try {
-    const selectedModel = getModel(provider, model);
-    
-    console.log('🤖 Sending to AI with messages:', messages);
-    
-    const result = streamText({
-      model: selectedModel,
-      messages: messages,  // Pass directly - SDK handles conversion
+    // AI SDK 6: Extract messages from request body
+    const body = await req.json();
+    const { messages } = body;
+
+    console.log('📥 Chat request received:', JSON.stringify(body, null, 2));
+
+    // Validate messages
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return new Response(
+        JSON.stringify({ error: 'No messages provided' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Check if messages are in UIMessage format (have parts) or need conversion
+    const uiMessages: UIMessage[] = messages.map((msg: Record<string, unknown>) => {
+      // If message already has parts array, it's UIMessage format
+      if (msg.parts && Array.isArray(msg.parts)) {
+        return msg as UIMessage;
+      }
+      
+      // Convert legacy format (content string) to UIMessage format
+      return {
+        id: msg.id || crypto.randomUUID(),
+        role: msg.role as 'user' | 'assistant' | 'system',
+        parts: [{ type: 'text', text: String(msg.content || '') }],
+      } as UIMessage;
     });
 
-    return result.toUIMessageStreamResponse({
-      originalMessages: messages,
-      generateMessageId: generateId,
-      onFinish: async ({ messages: finalMessages }) => {
-        console.log('✅ Finished, saving messages');
-        saveChat({ id, messages: finalMessages });
-      },
+    console.log('📝 Converted messages:', JSON.stringify(uiMessages, null, 2));
+
+    // AI SDK 6: Use streamText with convertToModelMessages
+    const result = streamText({
+      model: openai('gpt-4o-mini'),
+      system: 'You are a helpful AI assistant.',
+      messages: await convertToModelMessages(uiMessages),
     });
-  } catch (error: any) {
-    console.error('❌ AI API Error:', error);
-    console.error('Stack:', error.stack);
+
+    // AI SDK 6: Return UI message stream response
+    return result.toUIMessageStreamResponse();
     
-    if (error.message?.includes('API key')) {
+  } catch (error: unknown) {
+    console.error('❌ Chat API Error:', error);
+    
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const errorStack = error instanceof Error ? error.stack : '';
+    
+    console.error('Stack:', errorStack);
+    
+    if (errorMessage.includes('API key') || errorMessage.includes('apiKey')) {
       return new Response(
         JSON.stringify({ 
           error: 'API key not configured. Please add OPENAI_API_KEY to .env.local' 
         }),
-        { status: 500 }
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }
-    
+
     return new Response(
       JSON.stringify({ 
-        error: error.message || 'Failed to generate response',
-        stack: error.stack 
+        error: 'Failed to process chat request',
+        details: errorMessage 
       }),
-      { status: 500 }
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }
