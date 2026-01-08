@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^3.0.9
+        version: 3.0.9(zod@4.3.5)
+      '@ai-sdk/google':
+        specifier: ^3.0.6
+        version: 3.0.6(zod@4.3.5)
       '@ai-sdk/openai':
         specifier: ^3.0.7
         version: 3.0.7(zod@4.3.5)
@@ -60,8 +66,20 @@ importers:
 
 packages:
 
+  '@ai-sdk/anthropic@3.0.9':
+    resolution: {integrity: sha512-QBD4qDnwIHd+N5PpjxXOaWJig1aRB43J0PM5ZUe6Yyl9Qq2bUmraQjvNznkuFKy+hMFDgj0AvgGogTiO5TC+qA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
   '@ai-sdk/gateway@3.0.10':
     resolution: {integrity: sha512-sRlPMKd38+fdp2y11USW44c0o8tsIsT6T/pgyY04VXC3URjIRnkxugxd9AkU2ogfpPDMz50cBAGPnMxj+6663Q==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/google@3.0.6':
+    resolution: {integrity: sha512-Nr7E+ouWd/bKO9SFlgLnJJ1+fiGHC07KAeFr08faT+lvkECWlxVox3aL0dec8uCgBDUghYbq7f4S5teUrCc+QQ==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -1994,11 +2012,23 @@ packages:
 
 snapshots:
 
+  '@ai-sdk/anthropic@3.0.9(zod@4.3.5)':
+    dependencies:
+      '@ai-sdk/provider': 3.0.2
+      '@ai-sdk/provider-utils': 4.0.4(zod@4.3.5)
+      zod: 4.3.5
+
   '@ai-sdk/gateway@3.0.10(zod@4.3.5)':
     dependencies:
       '@ai-sdk/provider': 3.0.2
       '@ai-sdk/provider-utils': 4.0.4(zod@4.3.5)
       '@vercel/oidc': 3.1.0
+      zod: 4.3.5
+
+  '@ai-sdk/google@3.0.6(zod@4.3.5)':
+    dependencies:
+      '@ai-sdk/provider': 3.0.2
+      '@ai-sdk/provider-utils': 4.0.4(zod@4.3.5)
       zod: 4.3.5
 
   '@ai-sdk/openai@3.0.7(zod@4.3.5)':
