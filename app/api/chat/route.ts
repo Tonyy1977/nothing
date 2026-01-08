@@ -1,0 +1,131 @@
+// route.ts
+import type { MyUIMessage } from '@/util/chat-schema';
+import { readChat, saveChat } from '@/util/chat-store';
+import { convertToModelMessages, generateId, streamText } from 'ai';
+// import { after } from 'next/server';
+// import { createResumableStreamContext } from 'resumable-stream';
+import throttle from 'throttleit';
+
+export async function POST(req: Request) {
+  const body = await req.json();
+
+  const {
+    message,
+    id,
+    trigger,
+    messageId,
+  }: {
+    message: MyUIMessage | undefined;
+    id: string | undefined;
+    trigger: 'submit-message' | 'regenerate-message' | undefined;
+    messageId: string | undefined;
+  } = body;
+
+  // ---- hard validation (no silent failures) ----
+  if (!id || !trigger) {
+    return new Response(
+      JSON.stringify({ error: 'Missing id or trigger' }),
+      { status: 400 }
+    );
+  }
+
+  if (trigger === 'submit-message' && !message) {
+    return new Response(
+      JSON.stringify({ error: 'submit-message requires message' }),
+      { status: 400 }
+    );
+  }
+
+  // ---- load chat safely ----
+  const chat = await readChat(id);
+
+  let messages: MyUIMessage[] = Array.isArray(chat.messages)
+    ? [...chat.messages]
+    : [];
+
+  // ---- apply command ----
+  if (trigger === 'submit-message') {
+    if (messageId != null) {
+      const messageIndex = messages.findIndex(m => m.id === messageId);
+
+      if (messageIndex === -1) {
+        return new Response(
+          JSON.stringify({ error: `message ${messageId} not found` }),
+          { status: 404 }
+        );
+      }
+
+      messages = messages.slice(0, messageIndex);
+      messages.push(message);
+    } else {
+      messages.push(message);
+    }
+  }
+
+  if (trigger === 'regenerate-message') {
+    const messageIndex =
+      messageId == null
+        ? messages.length - 1
+        : messages.findIndex(m => m.id === messageId);
+
+    if (messageIndex === -1) {
+      return new Response(
+        JSON.stringify({ error: `message ${messageId} not found` }),
+        { status: 404 }
+      );
+    }
+
+    // set the messages to the message before the assistant message
+    messages = messages.slice(
+      0,
+      messages[messageIndex].role === 'assistant'
+        ? messageIndex
+        : messageIndex + 1
+    );
+  }
+
+  // ---- persist user-side state ----
+  await saveChat({ id, messages, activeStreamId: null });
+
+  // ---- stream AI response ----
+  const userStopSignal = new AbortController();
+
+  const result = streamText({
+    model: 'openai/gpt-5-mini',
+    messages: await convertToModelMessages(messages),
+    abortSignal: userStopSignal.signal,
+    // throttle reading from chat store to max once per second
+    onChunk: throttle(async () => {
+      const latest = await readChat(id);
+      if (latest.canceledAt) {
+        userStopSignal.abort();
+      }
+    }, 1000),
+    onAbort: () => {
+      console.log('aborted');
+    },
+  });
+
+  return result.toUIMessageStreamResponse({
+    originalMessages: messages,
+    generateMessageId: generateId,
+    messageMetadata: ({ part }) => {
+      if (part.type === 'start') {
+        return { createdAt: Date.now() };
+      }
+    },
+    onFinish: async ({ messages }) => {
+      await saveChat({ id, messages, activeStreamId: null });
+    },
+    // async consumeSseStream({ stream }) {
+    //   const streamId = generateId();
+
+    //   // send the sse stream into a resumable stream sink as well:
+    //   const streamContext = createResumableStreamContext({ waitUntil: after });
+    //   await streamContext.createNewResumableStream(streamId, () => stream);
+
+    //   // update the chat with the streamId
+    //   saveChat({ id, activeStreamId: streamId });
+    // },
+  });
+}
