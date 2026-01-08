@@ -1,7 +1,8 @@
-//page.tsx
 import { generateId } from 'ai';
-import Chat from './components/chat/Chat';
+import { redirect } from 'next/navigation';
 
-export default async function ChatPage() {
-  return <Chat chatData={{ id: generateId(), messages: [] }} isNewChat />;
+export default async function HomePage() {
+  // Generate a new chat ID and redirect to chat page
+  const chatId = generateId();
+  redirect(`/chat/${chatId}`);
 }

@@ -1,131 +1,129 @@
-// route.ts
-import type { MyUIMessage } from '@/util/chat-schema';
-import { readChat, saveChat } from '@/util/chat-store';
-import { convertToModelMessages, generateId, streamText } from 'ai';
-// import { after } from 'next/server';
-// import { createResumableStreamContext } from 'resumable-stream';
-import throttle from 'throttleit';
+// route.ts - Updated for new @ai-sdk/react API
+import { generateId, streamText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+// Uncomment when you add API keys:
+// import { anthropic } from '@ai-sdk/anthropic';
+// import { google } from '@ai-sdk/google-vertex';
+
+// In-memory chat storage (replace with DB later)
+const chats = new Map<string, any>();
+
+function readChat(id: string) {
+  return chats.get(id) || { id, messages: [] };
+}
+
+function saveChat(chat: any) {
+  chats.set(chat.id, chat);
+}
+
+// Multi-vendor model selector
+function getModel(provider: string = 'openai', modelName?: string) {
+  switch (provider.toLowerCase()) {
+    case 'openai':
+      return openai(modelName || 'gpt-4o-mini');
+    
+    // Uncomment when you have API keys:
+    // case 'anthropic':
+    //   return anthropic(modelName || 'claude-3-sonnet-20240229');
+    // case 'google':
+    //   return google(modelName || 'gemini-pro');
+    
+    default:
+      console.warn(`Unknown provider: ${provider}, defaulting to OpenAI`);
+      return openai('gpt-4o-mini');
+  }
+}
 
 export async function POST(req: Request) {
   const body = await req.json();
+  console.log('📥 Received body:', JSON.stringify(body, null, 2));
 
+  // New useChat API sends: { id, messages: [...] }
+  // OR individual message: { id, message: {...} }
   const {
-    message,
     id,
-    trigger,
-    messageId,
-  }: {
-    message: MyUIMessage | undefined;
-    id: string | undefined;
-    trigger: 'submit-message' | 'regenerate-message' | undefined;
-    messageId: string | undefined;
+    messages: incomingMessages,
+    message: singleMessage,
+    provider,
+    model,
   } = body;
 
-  // ---- hard validation (no silent failures) ----
-  if (!id || !trigger) {
+  if (!id) {
     return new Response(
-      JSON.stringify({ error: 'Missing id or trigger' }),
+      JSON.stringify({ error: 'Missing chat id' }),
       { status: 400 }
     );
   }
 
-  if (trigger === 'submit-message' && !message) {
+  // Get existing chat
+  const chat = readChat(id);
+  
+  // Determine messages to use
+  let messages = [];
+  
+  if (incomingMessages && Array.isArray(incomingMessages)) {
+    // New API sends full message array
+    messages = incomingMessages;
+  } else if (singleMessage) {
+    // Old format compatibility
+    messages = [...(chat.messages || []), singleMessage];
+  } else {
+    // Use existing chat messages
+    messages = chat.messages || [];
+  }
+
+  console.log('💬 Processing messages:', messages.length);
+  console.log('📝 Messages array:', JSON.stringify(messages, null, 2));
+
+  // Validate messages
+  if (!messages || messages.length === 0) {
     return new Response(
-      JSON.stringify({ error: 'submit-message requires message' }),
+      JSON.stringify({ error: 'No messages to process' }),
       { status: 400 }
     );
   }
 
-  // ---- load chat safely ----
-  const chat = await readChat(id);
+  // Save updated chat
+  saveChat({ id, messages });
 
-  let messages: MyUIMessage[] = Array.isArray(chat.messages)
-    ? [...chat.messages]
-    : [];
+  // Stream AI response
+  try {
+    const selectedModel = getModel(provider, model);
+    
+    console.log('🤖 Sending to AI with messages:', messages);
+    
+    const result = streamText({
+      model: selectedModel,
+      messages: messages,  // Pass directly - SDK handles conversion
+    });
 
-  // ---- apply command ----
-  if (trigger === 'submit-message') {
-    if (messageId != null) {
-      const messageIndex = messages.findIndex(m => m.id === messageId);
-
-      if (messageIndex === -1) {
-        return new Response(
-          JSON.stringify({ error: `message ${messageId} not found` }),
-          { status: 404 }
-        );
-      }
-
-      messages = messages.slice(0, messageIndex);
-      messages.push(message);
-    } else {
-      messages.push(message);
-    }
-  }
-
-  if (trigger === 'regenerate-message') {
-    const messageIndex =
-      messageId == null
-        ? messages.length - 1
-        : messages.findIndex(m => m.id === messageId);
-
-    if (messageIndex === -1) {
+    return result.toUIMessageStreamResponse({
+      originalMessages: messages,
+      generateMessageId: generateId,
+      onFinish: async ({ messages: finalMessages }) => {
+        console.log('✅ Finished, saving messages');
+        saveChat({ id, messages: finalMessages });
+      },
+    });
+  } catch (error: any) {
+    console.error('❌ AI API Error:', error);
+    console.error('Stack:', error.stack);
+    
+    if (error.message?.includes('API key')) {
       return new Response(
-        JSON.stringify({ error: `message ${messageId} not found` }),
-        { status: 404 }
+        JSON.stringify({ 
+          error: 'API key not configured. Please add OPENAI_API_KEY to .env.local' 
+        }),
+        { status: 500 }
       );
     }
-
-    // set the messages to the message before the assistant message
-    messages = messages.slice(
-      0,
-      messages[messageIndex].role === 'assistant'
-        ? messageIndex
-        : messageIndex + 1
+    
+    return new Response(
+      JSON.stringify({ 
+        error: error.message || 'Failed to generate response',
+        stack: error.stack 
+      }),
+      { status: 500 }
     );
   }
-
-  // ---- persist user-side state ----
-  await saveChat({ id, messages, activeStreamId: null });
-
-  // ---- stream AI response ----
-  const userStopSignal = new AbortController();
-
-  const result = streamText({
-    model: 'openai/gpt-5-mini',
-    messages: await convertToModelMessages(messages),
-    abortSignal: userStopSignal.signal,
-    // throttle reading from chat store to max once per second
-    onChunk: throttle(async () => {
-      const latest = await readChat(id);
-      if (latest.canceledAt) {
-        userStopSignal.abort();
-      }
-    }, 1000),
-    onAbort: () => {
-      console.log('aborted');
-    },
-  });
-
-  return result.toUIMessageStreamResponse({
-    originalMessages: messages,
-    generateMessageId: generateId,
-    messageMetadata: ({ part }) => {
-      if (part.type === 'start') {
-        return { createdAt: Date.now() };
-      }
-    },
-    onFinish: async ({ messages }) => {
-      await saveChat({ id, messages, activeStreamId: null });
-    },
-    // async consumeSseStream({ stream }) {
-    //   const streamId = generateId();
-
-    //   // send the sse stream into a resumable stream sink as well:
-    //   const streamContext = createResumableStreamContext({ waitUntil: after });
-    //   await streamContext.createNewResumableStream(streamId, () => stream);
-
-    //   // update the chat with the streamId
-    //   saveChat({ id, activeStreamId: streamId });
-    // },
-  });
 }
