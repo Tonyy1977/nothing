@@ -2,12 +2,12 @@ import { NextResponse } from 'next/server';
 import { AgentStore, TenantStore, verifyAgentAccess, ensureDemoSeeded } from '@/db/store';
 import type { Agent } from '@/types';
 
-export async function GET(req: Request, ctx: { params: { agentId: string } }) {
+export async function GET(req: Request, ctx: { params: Promise<{ agentId: string }> }) {
   ensureDemoSeeded();
 
   const url = new URL(req.url);
   const tenantId = url.searchParams.get('tenantId');
-  const { agentId } = ctx.params;
+  const { agentId } = await ctx.params;
 
   if (!tenantId) return NextResponse.json({ error: 'tenantId is required' }, { status: 400 });
 

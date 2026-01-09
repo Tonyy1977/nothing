@@ -1,7 +1,16 @@
+// app/api/chat/route.ts - Chat endpoint with RAG integration
 import { streamText, convertToModelMessages, generateId } from 'ai';
 import type { UIMessage } from 'ai';
 import { AgentStore } from '@/db/store';
 import { getModel } from '@/lib/models';
+import { 
+  retrieveContext, 
+  augmentSystemPrompt, 
+  extractRagMetadata, 
+  isRagEnabled,
+  extractUserQuery 
+} from '@/lib/knowledge';
+import type { RagContext } from '@/types';
 
 type Trigger = 'submit-message' | 'regenerate-message';
 
@@ -102,12 +111,46 @@ export async function POST(req: Request) {
   // Save updated messages before generation
   chat.messages = messages;
 
-  const systemPrompt = agent.config.systemPrompt?.trim();
+  // ============================================
+  // RAG: Retrieve relevant context from knowledge base
+  // ============================================
+  let ragContext: RagContext = { chunks: [], totalTokensEstimate: 0 };
+  
+  if (isRagEnabled(agent)) {
+    try {
+      const userQuery = extractUserQuery(messages);
+      
+      if (userQuery) {
+        ragContext = await retrieveContext(
+          userQuery,
+          tenantId,
+          agentId,
+          agent.config.ragSettings,
+          agent.config.knowledgeSourceIds
+        );
+        
+        if (ragContext.chunks.length > 0) {
+          console.log(`🔍 RAG: Found ${ragContext.chunks.length} relevant chunks (~${ragContext.totalTokensEstimate} tokens)`);
+        }
+      }
+    } catch (error) {
+      // Log but don't fail the request if RAG fails
+      console.error('RAG retrieval error:', error);
+    }
+  }
+
+  // Build system prompt (with RAG context if available)
+  let systemPrompt = agent.config.systemPrompt?.trim() || '';
+  
+  if (ragContext.chunks.length > 0) {
+    systemPrompt = augmentSystemPrompt(systemPrompt, ragContext, agent.config.ragSettings);
+  }
+
   const runtimeMessages = systemPrompt
     ? [makeSystemUIMessage(systemPrompt), ...messages]
     : messages;
 
-    const model = getModel(agent.config.model);
+  const model = getModel(agent.config.model);
 
   const result = streamText({
     model,
@@ -115,6 +158,11 @@ export async function POST(req: Request) {
     maxTokens: agent.config.maxTokens,
     messages: await convertToModelMessages(runtimeMessages),
   });
+
+  // Extract RAG metadata to include in response
+  const ragSources = ragContext.chunks.length > 0 
+    ? extractRagMetadata(ragContext) 
+    : undefined;
 
   return result.toUIMessageStreamResponse({
     originalMessages: messages,
@@ -126,6 +174,8 @@ export async function POST(req: Request) {
           tenantId,
           agentId,
           chatId,
+          // Include RAG sources in message metadata
+          ragSources,
         };
       }
     },
