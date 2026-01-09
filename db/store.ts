@@ -211,10 +211,11 @@ export const MessageStore = {
     return messages.get(chatId) || [];
   },
 
-  add(chatId: string, message: Message): Message {
+    add(chatId: string, message: Message): Message {
     const chatMessages = messages.get(chatId) || [];
     chatMessages.push(message);
     messages.set(chatId, chatMessages);
+    ChatStore.update(chatId, { updatedAt: new Date() }); // keep chat fresh
     return message;
   },
 
@@ -222,7 +223,19 @@ export const MessageStore = {
     const chatMessages = messages.get(chatId) || [];
     chatMessages.push(...newMessages);
     messages.set(chatId, chatMessages);
+    ChatStore.update(chatId, { updatedAt: new Date() });
     return newMessages;
+  },
+
+
+  addMany(chatId: string, newMessages: Message[]): Message[] {
+    const chatMessages = messages.get(chatId) || [];
+    chatMessages.push(...newMessages);
+    messages.set(chatId, chatMessages);
+    return newMessages;
+  },
+    has(chatId: string, messageId: string): boolean {
+    return (messages.get(chatId) || []).some(m => m.id === messageId);
   },
 };
 
@@ -254,6 +267,7 @@ export function ensureDemoSeeded() {
   if (TenantStore.getAll().length === 0) {
   }
 }
+
 
 
 // Initialize with demo data

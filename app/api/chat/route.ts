@@ -1,203 +1,135 @@
-// app/api/chat/route.ts - Multi-tenant chat API (Phase 2)
-import { streamText, convertToModelMessages, type UIMessage } from 'ai';
-import { getModel } from '@/lib/models';
-import {
-  TenantStore,
-  ChatStore,
-  MessageStore,
-  verifyAgentAccess,
-  ensureDemoSeeded,
-} from '@/db/store';
-import type { ChatRequest, Chat, Message, MessagePart } from '@/types';
+import { streamText, convertToModelMessages, generateId } from 'ai';
+import type { UIMessage } from 'ai';
+import { AgentStore } from '@/db/store';
 
-export const maxDuration = 30;
+type Trigger = 'submit-message' | 'regenerate-message';
 
-function toTextParts(content: string): MessagePart[] {
-  return [{ type: 'text', text: content }];
+type ChatState = {
+  messages: UIMessage[];
+};
+
+const CHAT_DB = new Map<string, ChatState>();
+
+function keyOf(tenantId: string, agentId: string, chatId: string) {
+  return `${tenantId}:${agentId}:${chatId}`;
+}
+
+function getChat(tenantId: string, agentId: string, chatId: string): ChatState {
+  const key = keyOf(tenantId, agentId, chatId);
+  const existing = CHAT_DB.get(key);
+  if (existing) return existing;
+
+  const created: ChatState = { messages: [] };
+  CHAT_DB.set(key, created);
+  return created;
+}
+
+function makeSystemUIMessage(text: string): UIMessage {
+  return {
+    id: generateId(),
+    role: 'system',
+    parts: [{ type: 'text', text }],
+  } as UIMessage;
 }
 
 export async function POST(req: Request) {
+  let body: any;
   try {
-    ensureDemoSeeded();
+    body = await req.json();
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
 
-    const body = (await req.json().catch(() => null)) as ChatRequest | null;
-    if (!body) {
-      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
+  const tenantId = String(body.tenantId ?? '');
+  const agentId = String(body.agentId ?? '');
+  const chatId = String(body.chatId ?? body.id ?? '');
+
+  if (!tenantId || !agentId || !chatId) {
+    return Response.json(
+      { error: 'Missing tenantId, agentId, or chatId (or id).' },
+      { status: 400 },
+    );
+  }
+
+  const agent = AgentStore.getById(agentId);
+  if (!agent) return Response.json({ error: 'Agent not found' }, { status: 404 });
+  if (agent.tenantId !== tenantId) {
+    return Response.json({ error: 'Agent does not belong to tenant' }, { status: 403 });
+  }
+
+  const chat = getChat(tenantId, agentId, chatId);
+  let messages: UIMessage[] = Array.isArray(chat.messages) ? chat.messages : [];
+
+  // Support BOTH formats:
+  // A) DefaultChatTransport: { id, trigger, message, messageId }
+  // B) Simple: { messages: UIMessage[] }
+  if (Array.isArray(body.messages)) {
+    messages = body.messages;
+  } else {
+    const trigger: Trigger = (body.trigger ?? 'submit-message') as Trigger;
+    const messageId: string | undefined = body.messageId ?? undefined;
+    const message: UIMessage | undefined = body.message ?? undefined;
+
+    if (trigger === 'submit-message') {
+      if (!message) {
+        return Response.json({ error: 'Missing message for submit-message' }, { status: 400 });
+      }
+
+      if (messageId != null) {
+        const idx = messages.findIndex(m => m.id === messageId);
+        if (idx === -1) return Response.json({ error: `message ${messageId} not found` }, { status: 400 });
+
+        messages = messages.slice(0, idx);
+        messages.push(message);
+      } else {
+        messages = [...messages, message];
+      }
     }
 
-    const { messages, tenantId, agentId, chatId } = body;
+    if (trigger === 'regenerate-message') {
+      const idx =
+        messageId == null
+          ? messages.length - 1
+          : messages.findIndex(m => m.id === messageId);
 
-    if (!tenantId || !agentId) {
-      return new Response(JSON.stringify({ error: 'tenantId and agentId are required' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      if (idx === -1) return Response.json({ error: `message ${messageId} not found` }, { status: 400 });
+
+      messages = messages.slice(0, messages[idx].role === 'assistant' ? idx : idx + 1);
     }
+  }
 
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return new Response(JSON.stringify({ error: 'No messages provided' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+  // Save updated messages before generation
+  chat.messages = messages;
 
-    // 1) Validate tenant
-    const tenant = TenantStore.getById(tenantId);
-    if (!tenant) {
-      return new Response(JSON.stringify({ error: 'Tenant not found' }), {
-        status: 404,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+  const systemPrompt = agent.config.systemPrompt?.trim();
+  const runtimeMessages = systemPrompt
+    ? [makeSystemUIMessage(systemPrompt), ...messages]
+    : messages;
 
-    // 2) Validate agent ownership
-    const agent = verifyAgentAccess(tenantId, agentId);
-    if (!agent) {
-      return new Response(JSON.stringify({ error: 'Agent not found or access denied' }), {
-        status: 404,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+  const model = `${agent.config.model.provider}/${agent.config.model.model}`;
 
-    if (agent.status !== 'active') {
-      return new Response(JSON.stringify({ error: `Agent is ${agent.status}, not accepting requests` }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+  const result = streamText({
+    model,
+    temperature: agent.config.temperature,
+    maxTokens: agent.config.maxTokens,
+    messages: await convertToModelMessages(runtimeMessages),
+  });
 
-    // 3) Enforce plan allowed models
-    if (!tenant.settings.allowedModels.includes(agent.config.model)) {
-      return new Response(
-        JSON.stringify({
-          error: `Model ${agent.config.model} not available on ${tenant.plan} plan`,
-          allowedModels: tenant.settings.allowedModels,
-          upgradeRequired: true,
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } },
-      );
-    }
-
-    // 4) Get or create chat
-    let chat: Chat;
-    let isNewChat = false;
-
-    if (chatId) {
-      const existing = ChatStore.getById(chatId);
-      if (!existing) {
-        chat = ChatStore.create({
-          id: chatId,
+  return result.toUIMessageStreamResponse({
+    originalMessages: messages,
+    generateMessageId: generateId,
+    messageMetadata: ({ part }) => {
+      if (part.type === 'start') {
+        return {
+          createdAt: Date.now(),
           tenantId,
           agentId,
-          status: 'active',
-          metadata: { source: 'api' },
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-        isNewChat = true;
-      } else if (existing.tenantId !== tenantId || existing.agentId !== agentId) {
-        return new Response(JSON.stringify({ error: 'Chat not found or access denied' }), {
-          status: 404,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      } else {
-        chat = existing;
-      }
-    } else {
-      chat = ChatStore.create({
-        id: `chat_${crypto.randomUUID().slice(0, 12)}`,
-        tenantId,
-        agentId,
-        status: 'active',
-        metadata: { source: 'api' },
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      isNewChat = true;
-    }
-
-    // 5) Convert incoming messages to UIMessage
-    const uiMessages: UIMessage[] = messages.map((m) => {
-      const id = m.id ?? crypto.randomUUID();
-      if (Array.isArray(m.parts)) {
-        return { id, role: m.role, parts: m.parts } as UIMessage;
-      }
-      return {
-        id,
-        role: m.role,
-        parts: toTextParts(String(m.content ?? '')),
-      } as UIMessage;
-    });
-
-    // 6) Persist NEW user messages only (dedupe by message.id)
-    const existingIds = new Set(MessageStore.getByChatId(chat.id).map((mm) => mm.id));
-
-    const newUserMessages = uiMessages
-      .filter((m) => m.role === 'user')
-      .filter((m) => !existingIds.has(m.id))
-      .map(
-        (m): Message => ({
-          id: m.id,
-          chatId: chat.id,
-          role: 'user',
-          parts: (m.parts ?? toTextParts('')) as MessagePart[],
-          createdAt: new Date(),
-        }),
-      );
-
-    if (newUserMessages.length > 0) {
-      MessageStore.addMany(chat.id, newUserMessages);
-      ChatStore.update(chat.id, { updatedAt: new Date() });
-    }
-
-    // 7) Get model from agent config
-    const model = getModel(agent.config.model);
-
-    // 8) Stream response
-    const result = streamText({
-      model,
-      system: agent.config.systemPrompt,
-      messages: await convertToModelMessages(uiMessages),
-      temperature: agent.config.temperature,
-      maxTokens: agent.config.maxTokens,
-    });
-
-    // 9) Return stream + persist assistant on finish
-    return result.toUIMessageStreamResponse({
-      onFinish: async ({ messages: finishedMessages }) => {
-        const finalAssistant = [...finishedMessages].reverse().find((m) => m.role === 'assistant');
-        if (!finalAssistant) return;
-
-        const existingNow = new Set(MessageStore.getByChatId(chat.id).map((mm) => mm.id));
-        if (existingNow.has(finalAssistant.id)) return; // dedupe
-
-        const assistantMsg: Message = {
-          id: finalAssistant.id,
-          chatId: chat.id,
-          role: 'assistant',
-          parts: (finalAssistant.parts ?? toTextParts(finalAssistant.content ?? '')) as MessagePart[],
-          metadata: { model: agent.config.model },
-          createdAt: new Date(),
+          chatId,
         };
-
-        MessageStore.add(chat.id, assistantMsg);
-        ChatStore.update(chat.id, { updatedAt: new Date() });
-      },
-      headers: {
-        'X-Chat-Id': chat.id,
-        'X-Agent-Id': agent.id,
-        'X-Tenant-Id': tenantId,
-        'X-Is-New-Chat': isNewChat ? 'true' : 'false',
-      },
-    });
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    return new Response(JSON.stringify({ error: 'Failed to process chat request', details: msg }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+      }
+    },
+    onFinish: ({ messages: finalMessages }) => {
+      chat.messages = finalMessages;
+    },
+  });
 }
