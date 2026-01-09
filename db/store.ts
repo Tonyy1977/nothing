@@ -211,7 +211,7 @@ export const MessageStore = {
     return messages.get(chatId) || [];
   },
 
-    add(chatId: string, message: Message): Message {
+  add(chatId: string, message: Message): Message {
     const chatMessages = messages.get(chatId) || [];
     chatMessages.push(message);
     messages.set(chatId, chatMessages);
@@ -219,22 +219,7 @@ export const MessageStore = {
     return message;
   },
 
-  addMany(chatId: string, newMessages: Message[]): Message[] {
-    const chatMessages = messages.get(chatId) || [];
-    chatMessages.push(...newMessages);
-    messages.set(chatId, chatMessages);
-    ChatStore.update(chatId, { updatedAt: new Date() });
-    return newMessages;
-  },
-
-
-  addMany(chatId: string, newMessages: Message[]): Message[] {
-    const chatMessages = messages.get(chatId) || [];
-    chatMessages.push(...newMessages);
-    messages.set(chatId, chatMessages);
-    return newMessages;
-  },
-    has(chatId: string, messageId: string): boolean {
+  has(chatId: string, messageId: string): boolean {
     return (messages.get(chatId) || []).some(m => m.id === messageId);
   },
 };
@@ -265,6 +250,7 @@ export function verifyChatAccess(tenantId: string, chatId: string): Chat | null 
 export function ensureDemoSeeded() {
   // Seed only once (Next dev / Turbopack can reload modules)
   if (TenantStore.getAll().length === 0) {
+      seedDemoData();
   }
 }
 

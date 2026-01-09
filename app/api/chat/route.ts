@@ -1,6 +1,7 @@
 import { streamText, convertToModelMessages, generateId } from 'ai';
 import type { UIMessage } from 'ai';
 import { AgentStore } from '@/db/store';
+import { getModel } from '@/lib/models';
 
 type Trigger = 'submit-message' | 'regenerate-message';
 
@@ -106,7 +107,7 @@ export async function POST(req: Request) {
     ? [makeSystemUIMessage(systemPrompt), ...messages]
     : messages;
 
-  const model = `${agent.config.model.provider}/${agent.config.model.model}`;
+    const model = getModel(agent.config.model);
 
   const result = streamText({
     model,

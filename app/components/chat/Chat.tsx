@@ -1,8 +1,9 @@
 'use client';
 
 import * as React from 'react';
+import { DefaultChatTransport } from 'ai';
 import { useChat } from '@ai-sdk/react';
-import type { Agent } from '@/types';
+import { MODEL_INFO, type Agent } from '@/types';
 
 export default function Chat({
   tenantId,
@@ -21,22 +22,28 @@ export default function Chat({
   }
 
   const { messages, sendMessage, status, stop, regenerate, error } = useChat({
-    api: '/api/chat',
+
     id: chatId,
-    body: {
-      tenantId,
-      agentId: agent.id,
-      chatId,
-    },
+        transport: new DefaultChatTransport({
+      api: '/api/chat',
+      body: {
+        tenantId,
+        agentId: agent.id,
+        chatId,
+      },
+    }),
   });
+
+  const modelInfo = MODEL_INFO[agent.config.model];
+  const modelLabel = modelInfo
+    ? `${modelInfo.provider}/${agent.config.model}`
+    : agent.config.model;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <b>{agent.name}</b>
-        <span style={{ opacity: 0.6 }}>
-          ({agent.config.model.provider}/{agent.config.model.model})
-        </span>
+                <span style={{ opacity: 0.6 }}>({modelLabel})</span>
 
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <button type="button" onClick={() => regenerate()} disabled={status === 'streaming'}>

@@ -1,10 +1,20 @@
 'use client';
 
+import { DefaultChatTransport, generateId } from 'ai';
 import { useChat } from '@ai-sdk/react';
 
 export default function ChatDiagnostic() {
+  const demoChatId = generateId();
   const result = useChat({
-    api: '/api/chat',
+    id: demoChatId,
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+      body: {
+        tenantId: 'tenant_demo',
+        agentId: 'agent_support',
+        chatId: demoChatId,
+      },
+    }),
   });
 
   return (
