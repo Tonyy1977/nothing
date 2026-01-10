@@ -192,13 +192,18 @@ export async function POST(req: Request) {
     // 9. RETURN STREAM WITH PERSISTENCE ON FINISH
     // ============================================
     return result.toUIMessageStreamResponse({
-      onFinish: async ({ response }) => {
+      onFinish: async ({ responseMessage }) => {
+        const responseText = (responseMessage.parts || [])
+          .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+          .map((part) => part.text)
+          .join('');
+
         // Persist assistant message
         const assistantMsg: Message = {
           id: `msg_${crypto.randomUUID().slice(0, 12)}`,
           chatId: chat.id,
           role: 'assistant',
-          parts: [{ type: 'text', text: response.messages[0]?.content?.toString() || '' }],
+          parts: [{ type: 'text', text: responseText }],
           metadata: {
             model: agent.config.model,
           },
